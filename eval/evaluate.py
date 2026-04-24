@@ -145,11 +145,20 @@ def main():
 
     model_config = ModelConfig.from_dict(config["model"])
     model = LLM(model_config)
-    model.load_state_dict(checkpoint["model_state_dict"])
+
+    # Handle fine-tune checkpoints: state_dict may have a larger vocab than
+    # the stored config (chat tokens were added). Resize before loading.
+    state_dict = checkpoint["model_state_dict"]
+    ckpt_vocab = state_dict["token_emb.weight"].shape[0]
+    if ckpt_vocab != model_config.vocab_size:
+        model.resize_token_embeddings(ckpt_vocab)
+
+    model.load_state_dict(state_dict)
     model = model.to(device)
     model.eval()
 
-    tokenizer = Tokenizer()
+    # Tokenizer: match checkpoint vocab so special chat tokens are decoded correctly
+    tokenizer = Tokenizer(add_chat_tokens=(ckpt_vocab > 50257))
 
     print(f"Model: {model.param_count():,} parameters")
     print(f"Device: {device} ({dtype})")

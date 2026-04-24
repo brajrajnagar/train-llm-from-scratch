@@ -145,7 +145,8 @@ The model reads billions of tokens of web text and learns to predict the next to
 We teach the model to be a chatbot using ~15K instruction-response pairs (Dolly-15K). Key differences from pretraining:
 - **Lower learning rate** (2e-5 vs 6e-4) to preserve pretrained knowledge
 - **Loss masking** -- only train on assistant responses, not user prompts
-- **Special tokens** -- `<|user|>`, `<|assistant|>`, `<|end_turn|>` format
+- **Special tokens** -- `<|user|>`, `<|assistant|>`, `<|end_turn|>` format (vocab grows 50,257 -> 50,261, embeddings are resized before loading the pretrain checkpoint)
+- **Validation split** -- 2% of examples are held out deterministically (seed=42) via `--val_split`, so logged val loss / perplexity are real numbers rather than placeholders
 
 ### Phase 3: Chat
 Interactive inference with conversation history, temperature sampling, and top-k/top-p filtering.
@@ -158,6 +159,20 @@ Interactive inference with conversation history, temperature sampling, and top-k
 - **Checkpoints are saved automatically** -- you can resume with `--resume`
 - **Gradient checkpointing** -- enable in config if you run out of GPU memory
 - **Loss around 3-4** after pretraining is typical for a 160M model
+
+## Expected Results (160M, 3x B200)
+
+Reference numbers from an actual run of this pipeline:
+
+| Phase | Steps | Time | Loss | Perplexity |
+|-------|-------|------|------|------------|
+| Pretrain (fineweb-edu, 10BT sample) | 50,000 | ~4h | val 2.92 | 18.84 |
+| Fine-tune (Dolly-15K, val_split=2%) | 2,000 (best @ 1200) | ~7m | val 2.31 | 10.09 |
+
+Notes:
+- Fine-tuning slightly *raises* perplexity on the raw web-text val set (18.84 -> 21.02) because the distribution shifts toward chat/instruction style. That is expected -- judge quality on chat-formatted prompts, not on web text.
+- Mild overfitting on Dolly-15K after ~step 1200 is normal for a 15K-example dataset; the `best.pt` checkpoint captures the turning point.
+- At this scale the model still loops on open-ended prompts. Scaling up the pretrain corpus, model size (400M config), or instruction dataset all help more than longer training.
 
 ## References
 

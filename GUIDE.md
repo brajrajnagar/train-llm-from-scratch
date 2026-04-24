@@ -105,7 +105,11 @@ These are short files that wire everything together. Compare them to see the key
 | Learning rate | 6e-4 (high) | 2e-5 (low) |
 | Steps | 50,000 | 2,000 |
 | Loss | All tokens | Only assistant responses |
+| Val split | 0.5% of corpus (`val.bin`) | 2% of JSONL, deterministic (seed=42) |
+| Vocab | 50,257 | 50,261 (+4 chat tokens, embeddings resized) |
 | Result | Text completer | Chatbot |
+
+Fine-tuning adds four special tokens (`<|system|>`, `<|user|>`, `<|assistant|>`, `<|end_turn|>`) and calls `model.resize_token_embeddings(50261)` before loading the pretrain state dict. The saved finetune checkpoint stores the *pretrain* model config (still `vocab_size=50257`) but has the larger embeddings in its state dict, so `chat.py` and `eval/evaluate.py` detect the mismatch and resize before loading.
 
 ### 7. Chat Interface
 
@@ -118,6 +122,14 @@ How inference works: format conversation with special tokens, generate until `<|
 **Read:** `eval/evaluate.py`
 
 How to measure model quality: **perplexity** (lower = better) and sample generation.
+
+Works on both pretrain and finetune checkpoints. For finetune checkpoints it resizes embeddings to the 50,261-token vocab before loading (matching `chat.py`), and adds chat tokens to the tokenizer so decoded samples render correctly.
+
+Example:
+```bash
+python -m eval.evaluate --checkpoint data/checkpoints/pretrain/best.pt
+python -m eval.evaluate --checkpoint data/checkpoints/finetune/best.pt
+```
 
 ### 9. Configuration
 
@@ -154,6 +166,34 @@ bash scripts/04_finetune.sh
 bash scripts/05_chat.sh
 ```
 
+## Gotchas (non-obvious things to keep in mind)
+
+These are subtle points where the pipeline can silently misbehave. Read before modifying the data path.
+
+### Fine-tuning targets must not share storage with inputs
+
+In `src/data.py:FinetuneDataset.__getitem__`, the naive code
+
+```python
+x = token_ids[:-1]
+y = token_ids[1:]
+y[mask == 0] = -1  # BUG: also writes into x, because x and y are overlapping views
+```
+
+corrupts `x` because `token_ids[:-1]` and `token_ids[1:]` are views into the same underlying tensor. Writing `-1` into `y[i]` also writes into `x[i+1]`, which then crashes the embedding lookup with a CUDA "vectorized gather kernel index out of bounds" assertion. Always `.clone()` one of the two before mutating.
+
+### Fine-tuning val loss is meaningless if you forget to pass a val loader
+
+`Trainer.evaluate()` returns `float('inf')` when `val_dataloader is None`, which then prints as `Perplexity: 485165195.41` (the overflow-capped `exp(20)`). This is a placeholder, not a signal. `src/finetune.py` now does a deterministic 2% holdout (`--val_split`, seed=42) so logged val numbers are real.
+
+### Fine-tune checkpoints carry a stale vocab_size in their stored config
+
+`finetune.py` calls `resize_token_embeddings(50261)` on the model before training, but the config saved into the checkpoint still says `vocab_size: 50257` (copied from the pretrain YAML). Any loader has to detect the mismatch via `state_dict['token_emb.weight'].shape[0]` and resize *before* `load_state_dict`. `chat.py` and `eval/evaluate.py` both do this; custom loaders must too.
+
+### The 160M model needs help with repetition
+
+At this scale the model loops on open-ended prompts even with `top_k=50, top_p=0.9, temperature=0.7`. Use the chat template (`<|user|>...<|end_turn|><|assistant|>`) rather than raw prompts; the fine-tuning signal only conditioned on that exact format.
+
 ## Key Concepts Cheat Sheet
 
 | Concept | What It Means | Where in Code |
@@ -170,3 +210,5 @@ bash scripts/05_chat.sh
 | Weight tying | Embedding and output share weights | `src/model.py:LLM.__init__` |
 | Memory mapping | Load data pages on demand from disk | `src/data.py:read_tokenized_bin` |
 | Random sampling | Pick random offsets into token stream (avoids shuffling billions of indices) | `src/data.py:PretrainDataset` |
+| Deterministic val holdout | 2% of Dolly-15K, seed=42, so every rank sees the same split | `src/finetune.py` |
+| Vocab resize on load | Detect finetune state_dict vocab > model config vocab, resize first | `src/chat.py`, `eval/evaluate.py` |

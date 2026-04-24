@@ -45,7 +45,15 @@ def main():
     # Create model and load weights
     model_config = ModelConfig.from_dict(config["model"])
     model = LLM(model_config)
-    model.load_state_dict(checkpoint["model_state_dict"])
+
+    # Fine-tune checkpoints include resized embeddings for chat tokens --
+    # the saved config still has the original vocab_size, so resize first.
+    state_dict = checkpoint["model_state_dict"]
+    ckpt_vocab = state_dict["token_emb.weight"].shape[0]
+    if ckpt_vocab != model_config.vocab_size:
+        model.resize_token_embeddings(ckpt_vocab)
+
+    model.load_state_dict(state_dict)
     model = model.to(device)
     model.eval()
 
