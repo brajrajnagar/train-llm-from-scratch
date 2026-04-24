@@ -54,11 +54,13 @@ How data flows from raw text to training batches:
 HuggingFace dataset
   --> tokenize with BPE
     --> save as .bin file (uint16, memory-mapped)
-      --> PretrainDataset (random chunks)
+      --> PretrainDataset (random chunks via random offset sampling)
         --> DataLoader (batches for GPU)
 ```
 
-Key concept: **memory-mapped files** -- the dataset is too large for RAM, so we let the OS load pages on demand.
+Two key concepts:
+- **Memory-mapped files** -- the dataset is too large for RAM, so we let the OS load pages on demand.
+- **Random offset sampling** -- with ~10B tokens, we can't shuffle all indices (too slow). Instead, each `__getitem__` picks a random offset into the token stream, giving uniform coverage without materializing a huge index list.
 
 **After reading:** You understand how billions of tokens get to the GPU efficiently.
 
@@ -98,7 +100,8 @@ These are short files that wire everything together. Compare them to see the key
 
 | | Pretraining | Fine-tuning |
 |--|------------|-------------|
-| Data | Web text (billions of tokens) | Instructions (15K examples) |
+| Data | Web text (~10B tokens) | Instructions (15K examples) |
+| Batch size | 64 per GPU | 4 per GPU |
 | Learning rate | 6e-4 (high) | 2e-5 (low) |
 | Steps | 50,000 | 2,000 |
 | Loss | All tokens | Only assistant responses |
@@ -166,3 +169,4 @@ bash scripts/05_chat.sh
 | Loss masking | Only train on assistant responses | `src/tokenizer.py:encode_chat` |
 | Weight tying | Embedding and output share weights | `src/model.py:LLM.__init__` |
 | Memory mapping | Load data pages on demand from disk | `src/data.py:read_tokenized_bin` |
+| Random sampling | Pick random offsets into token stream (avoids shuffling billions of indices) | `src/data.py:PretrainDataset` |

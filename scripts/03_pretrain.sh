@@ -9,7 +9,7 @@
 #   - No GPU        -> python on CPU (very slow!)
 #
 # Time estimates for 160M model:
-#   3x B200:    ~4-12 hours
+#   3x B200:    ~4 hours (~657K tokens/sec)
 #   1x A100:    ~24-48 hours
 #   1x RTX4090: ~24-48 hours
 #   CPU:        Don't. (But it will work!)
@@ -25,10 +25,19 @@ set -e
 CONFIG=${1:-"configs/160m.yaml"}
 RESUME=${2:-""}
 
+# --- Logging setup ---
+LOG_DIR="data/logs"
+mkdir -p "$LOG_DIR"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+LOG_FILE="$LOG_DIR/03_pretrain_${TIMESTAMP}.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "Log file: $LOG_FILE"
+
 echo "============================================"
 echo "Step 3: Pretrain the LLM"
 echo "============================================"
-echo "Config: $CONFIG"
+echo "Timestamp: $(date)"
+echo "Config:    $CONFIG"
 
 GPU_COUNT=$(python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo "0")
 

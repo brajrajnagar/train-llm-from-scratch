@@ -20,15 +20,28 @@ DATASET=${1:-"HuggingFaceFW/fineweb-edu"}
 SUBSET=${2:-"sample-10BT"}
 OUTPUT_DIR=${3:-"data/raw"}
 
+# --- Logging setup ---
+LOG_DIR="data/logs"
+mkdir -p "$LOG_DIR"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+LOG_FILE="$LOG_DIR/01_download_${TIMESTAMP}.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "Log file: $LOG_FILE"
+
 echo "============================================"
 echo "Step 1: Download Training Data"
 echo "============================================"
-echo "Dataset: $DATASET"
-echo "Subset:  $SUBSET"
-echo "Output:  $OUTPUT_DIR"
+echo "Timestamp: $(date)"
+echo "Dataset:   $DATASET"
+echo "Subset:    $SUBSET"
+echo "Output:    $OUTPUT_DIR"
 echo ""
 
 mkdir -p "$OUTPUT_DIR"
+
+# Keep all HuggingFace cache inside data/ (no files outside the project)
+export HF_HOME="data/hf_cache"
+export HF_DATASETS_CACHE="data/hf_cache/datasets"
 
 python3 -c "
 from datasets import load_dataset
@@ -39,6 +52,7 @@ subset = '$SUBSET'
 output_dir = '$OUTPUT_DIR'
 
 print(f'Loading dataset from HuggingFace: {dataset_name}')
+print(f'Cache dir: {os.environ.get(\"HF_HOME\")}')
 if subset:
     print(f'Subset: {subset}')
     dataset = load_dataset(dataset_name, name=subset, split='train')
@@ -54,5 +68,5 @@ print('Done!')
 "
 
 echo ""
-echo "Download complete!"
+echo "Download complete! ($(date))"
 echo "Next step: bash scripts/02_prepare_data.sh"

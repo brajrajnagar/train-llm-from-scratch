@@ -55,6 +55,7 @@ import torch
 from tqdm import tqdm
 
 from src.distributed import save_checkpoint_distributed
+from src.tokenizer import Tokenizer
 
 
 class Trainer:
@@ -109,6 +110,17 @@ class Trainer:
         self.step = 0
         self.best_val_loss = float("inf")
         self.tokens_processed = 0
+        self.loss_history = []  # Recent losses for trend tracking
+
+        # For sample generation during eval
+        self.tokenizer = Tokenizer()
+        self.sample_prompts = [
+            "The meaning of life is",
+            "In a distant galaxy, scientists discovered",
+        ]
+
+        # Training start time
+        self.t_start = None
 
     def get_lr(self, step: int) -> float:
         """
@@ -132,16 +144,21 @@ class Trainer:
         """Main training loop."""
         self.step = start_step
         self.model.train()
+        self.t_start = time.time()
 
         train_iter = iter(self.train_dataloader)
         seq_length = self.config["model"]["seq_length"]
         batch_size = self.config["training"]["batch_size"]
+        tokens_per_step = batch_size * seq_length * self.grad_accum_steps * self.ctx.world_size
+        total_tokens_target = tokens_per_step * self.max_steps
 
         pbar = tqdm(
             range(start_step, self.max_steps),
             desc="Training",
             unit="step",
             disable=not self.ctx.is_main_process,
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]  {postfix}",
+            ncols=120,
         )
 
         for step in pbar:
@@ -203,16 +220,32 @@ class Trainer:
             # === Metrics ===
             t1 = time.time()
             dt = t1 - t0
-            tokens_per_step = batch_size * seq_length * self.grad_accum_steps * self.ctx.world_size
             tokens_per_sec = tokens_per_step / dt
             self.tokens_processed += tokens_per_step
 
+            # Track loss history for trend
+            self.loss_history.append(total_loss)
+            if len(self.loss_history) > 100:
+                self.loss_history.pop(0)
+
             # Logging
             if step % self.log_interval == 0:
-                pbar.set_postfix(
-                    loss=f"{total_loss:.4f}",
-                    lr=f"{lr:.2e}",
-                    tps=f"{tokens_per_sec:.0f}",
+                # Compute loss trend (avg of last 50 vs last 10)
+                avg_recent = sum(self.loss_history[-10:]) / len(self.loss_history[-10:])
+                if len(self.loss_history) >= 50:
+                    avg_older = sum(self.loss_history[-50:-10]) / 40
+                    trend = "↓" if avg_recent < avg_older else "↑" if avg_recent > avg_older * 1.01 else "→"
+                else:
+                    trend = ""
+
+                pct_tokens = self.tokens_processed / total_tokens_target * 100
+                elapsed = t1 - self.t_start
+                eta_str = self._format_time((elapsed / max(step - start_step, 1)) * (self.max_steps - step)) if step > start_step else "..."
+
+                pbar.set_postfix_str(
+                    f"loss={total_loss:.4f}{trend} | lr={lr:.1e} | "
+                    f"{tokens_per_sec/1000:.0f}K tok/s | "
+                    f"{pct_tokens:.1f}% data | ETA {eta_str}"
                 )
                 if self.ctx.is_main_process:
                     self._log_step(step, total_loss, lr, tokens_per_sec, grad_norm, dt)
@@ -221,17 +254,33 @@ class Trainer:
             if step > 0 and step % self.eval_interval == 0:
                 val_loss = self.evaluate()
                 perplexity = math.exp(min(val_loss, 20))  # Cap to avoid overflow
-                self.ctx.print(
-                    f"\nStep {step} | Val Loss: {val_loss:.4f} | "
-                    f"Perplexity: {perplexity:.2f} | "
-                    f"Tokens: {self.tokens_processed:,}"
+                elapsed = time.time() - self.t_start if self.t_start else 0
+
+                eval_msg = (
+                    f"\n{'='*60}\n"
+                    f"  EVAL @ step {step:,} | elapsed {self._format_time(elapsed)}\n"
+                    f"  Val Loss: {val_loss:.4f} | Perplexity: {perplexity:.2f}\n"
+                    f"  Train Loss (avg last 10): {sum(self.loss_history[-10:])/len(self.loss_history[-10:]):.4f}\n"
+                    f"  Best Val Loss: {min(self.best_val_loss, val_loss):.4f}\n"
+                    f"  Tokens Processed: {self.tokens_processed:,}\n"
+                    f"{'='*60}"
                 )
+                self.ctx.print(eval_msg)
+
+                # Write eval to log file too
+                if self.ctx.is_main_process:
+                    log_path = os.path.join(self.checkpoint_dir, "train.log")
+                    with open(log_path, "a") as f:
+                        f.write(eval_msg + "\n")
 
                 # Save best checkpoint
                 if val_loss < self.best_val_loss:
                     self.best_val_loss = val_loss
                     self._save("best.pt", step, val_loss)
                     self.ctx.print(f"  *** New best val loss: {val_loss:.4f} ***")
+
+                # Generate samples so you can eyeball quality in the logs
+                self._generate_samples(step)
 
                 self.model.train()
 
@@ -292,21 +341,85 @@ class Trainer:
             self.model, self.optimizer, step, val_loss, self.config, path, self.ctx
         )
 
-    def _log_step(self, step, loss, lr, tokens_per_sec, grad_norm, dt):
-        """
-        Log training metrics.
+    @staticmethod
+    def _format_time(seconds):
+        """Format seconds into human-readable string."""
+        if seconds < 60:
+            return f"{seconds:.0f}s"
+        elif seconds < 3600:
+            return f"{seconds/60:.0f}m"
+        else:
+            h = int(seconds // 3600)
+            m = int((seconds % 3600) // 60)
+            return f"{h}h{m:02d}m"
 
-        Currently prints to stdout. Can be extended to wandb/tensorboard
-        by adding logging calls here without changing the training loop.
-        """
+    def _log_step(self, step, loss, lr, tokens_per_sec, grad_norm, dt):
+        """Log training metrics with visual loss bar."""
         grad_str = f"{grad_norm:.4f}" if grad_norm is not None else "N/A"
+
+        # Visual loss bar: maps loss 0-12 to a 20-char bar
+        bar_width = 20
+        loss_clamped = max(0, min(loss, 12))
+        filled = int((1 - loss_clamped / 12) * bar_width)
+        loss_bar = "█" * filled + "░" * (bar_width - filled)
+
+        elapsed = time.time() - self.t_start if self.t_start else 0
+
         log_line = (
-            f"step={step:>6d} | loss={loss:.4f} | lr={lr:.2e} | "
-            f"grad_norm={grad_str} | tok/s={tokens_per_sec:.0f} | "
-            f"dt={dt:.2f}s | total_tok={self.tokens_processed:,}"
+            f"step={step:>6d} | loss={loss:.4f} [{loss_bar}] | lr={lr:.2e} | "
+            f"grad_norm={grad_str} | {tokens_per_sec/1000:.0f}K tok/s | "
+            f"dt={dt:.2f}s | tok={self.tokens_processed:,} | "
+            f"elapsed={self._format_time(elapsed)}"
         )
         # Write to log file
         log_path = os.path.join(self.checkpoint_dir, "train.log")
         os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
         with open(log_path, "a") as f:
             f.write(log_line + "\n")
+
+    @torch.no_grad()
+    def _generate_samples(self, step: int):
+        """
+        Generate sample completions after eval so you can eyeball quality.
+
+        All ranks must participate in forward passes (FSDP requirement),
+        but only rank 0 logs the results.
+        """
+        self.model.eval()
+        seq_length = self.config["model"]["seq_length"]
+
+        lines = [f"\n--- Sample generations at step {step} ---"]
+        for prompt in self.sample_prompts:
+            token_ids = self.tokenizer.encode(prompt)
+            idx = torch.tensor([token_ids], dtype=torch.long, device=self.ctx.device)
+
+            for _ in range(100):  # max_new_tokens
+                idx_cond = idx[:, -seq_length:]
+                with torch.autocast(
+                    device_type=self.ctx.device.type,
+                    dtype=self.ctx.dtype,
+                    enabled=self.use_amp,
+                ):
+                    logits, _ = self.model(idx_cond)
+                logits = logits[:, -1, :] / 0.8  # temperature
+                probs = torch.softmax(logits, dim=-1)
+                # top-k 40
+                topk_probs, topk_indices = torch.topk(probs, 40, dim=-1)
+                ix = torch.multinomial(topk_probs, 1)
+                next_token = torch.gather(topk_indices, -1, ix)
+                idx = torch.cat([idx, next_token], dim=1)
+
+            if self.ctx.is_main_process:
+                text = self.tokenizer.decode(idx[0].tolist())
+                lines.append(f"  PROMPT: {prompt}")
+                lines.append(f"  OUTPUT: {text}")
+                lines.append("")
+
+        if self.ctx.is_main_process:
+            lines.append("--- End samples ---\n")
+            sample_text = "\n".join(lines)
+            self.ctx.print(sample_text)
+
+            log_path = os.path.join(self.checkpoint_dir, "train.log")
+            with open(log_path, "a") as f:
+                f.write(sample_text + "\n")

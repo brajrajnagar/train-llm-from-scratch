@@ -78,7 +78,7 @@ def pick_config():
     print("    [1]  50M params  -- Quick test, ~30 min on GPU")
     print("                        (Start here to verify everything works)")
     print()
-    print("    [2] 160M params  -- Sweet spot, ~4-12 hours on multi-GPU")
+    print("    [2] 160M params  -- Sweet spot, ~4 hours on multi-GPU")
     print("                        (Good enough for a basic chatbot)")
     print()
     print("    [3] 400M params  -- Better quality, ~24-48 hours on multi-GPU")

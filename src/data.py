@@ -121,16 +121,28 @@ class PretrainDataset(Dataset):
       Input:  [tok_0, tok_1, ..., tok_{T-1}]
       Target: [tok_1, tok_2, ..., tok_T]
       We need T+1 contiguous tokens to create one training example.
+
+    WHY RANDOM SAMPLING?
+      With billions of tokens, DistributedSampler would try to shuffle
+      billions of indices (hangs). Instead, we pick random offsets each
+      time __getitem__ is called -- the idx is ignored. This gives us
+      uniform coverage without materializing a huge index list.
     """
 
-    def __init__(self, data_path: str, seq_length: int):
+    def __init__(self, data_path: str, seq_length: int, epoch_length: int = 100_000):
         self.data = read_tokenized_bin(data_path)
         self.seq_length = seq_length
+        self.n_tokens = len(self.data)
+        # Fixed epoch length so DataLoader/DistributedSampler don't choke
+        self.epoch_length = epoch_length
 
     def __len__(self) -> int:
-        return len(self.data) - self.seq_length
+        return self.epoch_length
 
     def __getitem__(self, idx: int) -> tuple:
+        # Random offset into the token stream
+        max_start = self.n_tokens - self.seq_length - 1
+        idx = np.random.randint(0, max_start)
         chunk = self.data[idx : idx + self.seq_length + 1].astype(np.int64)
         x = torch.from_numpy(chunk[:-1])
         y = torch.from_numpy(chunk[1:])
@@ -249,17 +261,23 @@ def tokenize_dataset(
         output_dir: Directory for train.bin and val.bin
         val_fraction: Fraction of data to hold out for validation
     """
-    from datasets import load_dataset
+    from datasets import load_dataset, load_from_disk
     from src.tokenizer import Tokenizer
 
     tokenizer = Tokenizer()
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"Loading dataset: {dataset_name} (subset: {dataset_subset})")
-    if dataset_subset:
-        dataset = load_dataset(dataset_name, name=dataset_subset, split="train")
+    # Try loading from local disk first (saved by 01_download_data.sh)
+    local_path = os.path.join(output_dir, "raw", dataset_subset if dataset_subset else "data")
+    if os.path.exists(local_path):
+        print(f"Loading dataset from disk: {local_path}")
+        dataset = load_from_disk(local_path)
     else:
-        dataset = load_dataset(dataset_name, split="train")
+        print(f"Loading dataset from HuggingFace: {dataset_name} (subset: {dataset_subset})")
+        if dataset_subset:
+            dataset = load_dataset(dataset_name, name=dataset_subset, split="train")
+        else:
+            dataset = load_dataset(dataset_name, split="train")
 
     print(f"Dataset loaded: {len(dataset)} examples")
 

@@ -1,5 +1,5 @@
 # 160M parameter model -- the sweet spot for this project
-# Trains in ~4-12 hours on 3x B200, ~24-48 hours on a single A100/4090
+# Trains in ~4 hours on 3x B200 (~657K tokens/sec), ~24-48 hours on a single A100/4090
 # Large enough to be a passable chatbot, small enough to iterate on
 
 model:
@@ -14,9 +14,9 @@ model:
   rope_theta: 10000.0
 
 training:
-  max_steps: 50000       # ~5B tokens with default batch config
-  batch_size: 8          # Per-GPU
-  grad_accum_steps: 4    # Effective batch = 8 * 3_gpus * 4 = 96 seqs = ~98K tokens
+  max_steps: 50000       # ~9.9B tokens at ~197K tokens/step
+  batch_size: 64         # Per-GPU (B200 178GB fits 128, leave headroom for FSDP)
+  grad_accum_steps: 1    # No accumulation needed -- large per-GPU batch
   learning_rate: 6.0e-4
   min_lr: 6.0e-5
   warmup_steps: 2000
@@ -35,5 +35,5 @@ eval_interval: 500
 eval_iters: 100
 log_interval: 10
 
-compile: true
+compile: false
 gradient_checkpointing: false    # Enable if OOM on smaller GPUs

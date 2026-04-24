@@ -18,9 +18,18 @@ set -e
 CONFIG=${1:-"configs/160m.yaml"}
 CHECKPOINT=${2:-"data/checkpoints/pretrain/best.pt"}
 
+# --- Logging setup ---
+LOG_DIR="data/logs"
+mkdir -p "$LOG_DIR"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+LOG_FILE="$LOG_DIR/04_finetune_${TIMESTAMP}.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "Log file: $LOG_FILE"
+
 echo "============================================"
 echo "Step 4: Fine-tune for Chat"
 echo "============================================"
+echo "Timestamp:  $(date)"
 echo "Config:     $CONFIG"
 echo "Checkpoint: $CHECKPOINT"
 echo ""
@@ -31,6 +40,10 @@ if [ ! -f "$CHECKPOINT" ]; then
     echo "Run pretraining first: bash scripts/03_pretrain.sh"
     exit 1
 fi
+
+# Keep all HuggingFace cache inside data/
+export HF_HOME="data/hf_cache"
+export HF_DATASETS_CACHE="data/hf_cache/datasets"
 
 # Prepare fine-tuning data if not already done
 if [ ! -f "data/finetune.jsonl" ]; then

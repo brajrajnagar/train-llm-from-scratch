@@ -13,6 +13,13 @@
 
 CHECKPOINT=${1:-"data/checkpoints/finetune/best.pt"}
 
+# --- Logging setup ---
+LOG_DIR="data/logs"
+mkdir -p "$LOG_DIR"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+LOG_FILE="$LOG_DIR/05_chat_${TIMESTAMP}.log"
+echo "Log file: $LOG_FILE"
+
 if [ ! -f "$CHECKPOINT" ]; then
     echo "ERROR: Checkpoint not found: $CHECKPOINT"
     echo "Run fine-tuning first: bash scripts/04_finetune.sh"

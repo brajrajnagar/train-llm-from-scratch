@@ -18,6 +18,7 @@ __pycache__/
 
 # Data (large files)
 data/raw/
+data/hf_cache/
 data/*.bin
 data/*.jsonl
 data/checkpoints/
@@ -26,5 +27,6 @@ data/checkpoints/
 !data/.gitkeep
 
 # Logs
+data/logs/
 *.log
 wandb/

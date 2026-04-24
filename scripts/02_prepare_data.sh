@@ -16,12 +16,25 @@ DATASET=${1:-"HuggingFaceFW/fineweb-edu"}
 SUBSET=${2:-"sample-10BT"}
 OUTPUT_DIR=${3:-"data"}
 
+# --- Logging setup ---
+LOG_DIR="data/logs"
+mkdir -p "$LOG_DIR"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+LOG_FILE="$LOG_DIR/02_prepare_${TIMESTAMP}.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "Log file: $LOG_FILE"
+
 echo "============================================"
 echo "Step 2: Prepare Data (Tokenize)"
 echo "============================================"
-echo "Dataset: $DATASET"
-echo "Output:  $OUTPUT_DIR"
+echo "Timestamp: $(date)"
+echo "Dataset:   $DATASET"
+echo "Output:    $OUTPUT_DIR"
 echo ""
+
+# Keep all HuggingFace cache inside data/
+export HF_HOME="data/hf_cache"
+export HF_DATASETS_CACHE="data/hf_cache/datasets"
 
 python3 -m src.data \
     --task pretrain \
@@ -31,7 +44,7 @@ python3 -m src.data \
     --val_fraction 0.005
 
 echo ""
-echo "Data preparation complete!"
+echo "Data preparation complete! ($(date))"
 echo "  Train: $OUTPUT_DIR/train.bin"
 echo "  Val:   $OUTPUT_DIR/val.bin"
 echo ""

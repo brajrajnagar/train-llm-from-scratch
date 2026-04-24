@@ -42,8 +42,8 @@ Our model uses the same architecture as Llama 3, scaled down for educational tra
 - Python 3.10+
 - PyTorch 2.1+
 - 1+ NVIDIA GPU (or Apple Silicon, or CPU for testing)
-- ~30GB disk space for data
-- ~4-12 hours training time (on 3x B200)
+- ~20GB disk space for tokenized data
+- ~4 hours training time (on 3x B200)
 
 ## Quick Start
 
@@ -81,6 +81,7 @@ train-llm-from-scratch/
 │   ├── 03_pretrain.sh        # Auto-detect GPUs, launch pretraining
 │   ├── 04_finetune.sh        # Fine-tune on Dolly-15K instructions
 │   └── 05_chat.sh            # Interactive chat session
+│       (all scripts write timestamped logs to data/logs/)
 ├── src/
 │   ├── model.py              # LLM architecture (RoPE, RMSNorm, SwiGLU, GQA)
 │   ├── tokenizer.py          # GPT-2 BPE tokenizer wrapper
@@ -92,7 +93,7 @@ train-llm-from-scratch/
 │   └── chat.py               # Interactive chat inference
 ├── eval/
 │   └── evaluate.py           # Perplexity + sample generation
-└── data/                     # Downloaded data, .bin files, checkpoints
+└── data/                     # .bin files, checkpoints, logs
 ```
 
 ## Hardware Compatibility
@@ -101,7 +102,7 @@ The code auto-detects your hardware and adapts:
 
 | Hardware | Strategy | Dtype | Est. Training Time (160M) |
 |----------|----------|-------|---------------------------|
-| 3x B200 | FSDP | BF16 | ~4-12 hours |
+| 3x B200 | FSDP | BF16 | ~4 hours |
 | 1x A100 | Single GPU | BF16 | ~24-48 hours |
 | 1x RTX 4090 | Single GPU | FP16 | ~24-48 hours |
 | Apple M3 Max | MPS | FP32 | ~96+ hours |
@@ -112,7 +113,7 @@ The code auto-detects your hardware and adapts:
 | Config | Parameters | Training Time (3x B200) | Quality |
 |--------|-----------|-------------------------|---------|
 | `50m.yaml` | ~50M | ~30 minutes | Smoke test / debug |
-| `160m.yaml` | ~160M | ~4-12 hours | Basic chatbot |
+| `160m.yaml` | ~160M | ~4 hours | Basic chatbot |
 | `400m.yaml` | ~400M | ~24-48 hours | Better quality |
 
 Start with `50m.yaml` to verify your setup, then train `160m.yaml` for real results.
@@ -153,6 +154,7 @@ Interactive inference with conversation history, temperature sampling, and top-k
 
 - **Start with 50m.yaml** to verify the pipeline works before committing to hours of training
 - **Monitor the loss** -- it should decrease steadily. If it spikes, something is wrong
+- **Check logs** -- every script writes timestamped logs to `data/logs/`
 - **Checkpoints are saved automatically** -- you can resume with `--resume`
 - **Gradient checkpointing** -- enable in config if you run out of GPU memory
 - **Loss around 3-4** after pretraining is typical for a 160M model
