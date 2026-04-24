@@ -1,0 +1,33 @@
+# =============================================================================
+# Requirements for train-llm-from-scratch
+# =============================================================================
+#
+# Install with: pip install -r requirements.txt
+#
+# For NVIDIA GPUs (recommended):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r requirements.txt
+#
+# For CPU only:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
+#
+# For Apple Silicon (MPS):
+#   pip install torch
+#   pip install -r requirements.txt
+
+# Core
+torch>=2.1.0
+numpy>=1.24.0
+
+# Tokenizer
+transformers>=4.35.0
+
+# Data download and processing
+datasets>=2.14.0
+
+# Config files
+pyyaml>=6.0
+
+# Progress bars
+tqdm>=4.60.0

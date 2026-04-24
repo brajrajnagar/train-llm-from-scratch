@@ -1,0 +1,30 @@
+# Virtual environment
+venv/
+.env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Data (large files)
+data/raw/
+data/*.bin
+data/*.jsonl
+data/checkpoints/
+
+# But keep the data directory structure
+!data/.gitkeep
+
+# Logs
+*.log
+wandb/

@@ -1,0 +1,44 @@
+# 50M parameter model -- for debugging and smoke testing
+# Trains in ~30 minutes on a single GPU, ~10 minutes on 3x B200
+# Use this to verify your setup before committing to a long training run
+
+# Model Architecture
+model:
+  d_model: 512
+  n_heads: 8
+  n_kv_heads: 4
+  n_blocks: 8
+  d_ff: 1408           # ~8/3 * 512, rounded to multiple of 128
+  vocab_size: 50257     # GPT-2 tokenizer
+  seq_length: 512
+  dropout: 0.0          # Modern LLMs use 0 dropout during pretraining
+  rope_theta: 10000.0
+
+# Training
+training:
+  max_steps: 10000
+  batch_size: 16        # Per-GPU batch size
+  grad_accum_steps: 2   # Effective batch = 16 * num_gpus * 2
+  learning_rate: 8.0e-4
+  min_lr: 8.0e-5        # 10% of peak LR
+  warmup_steps: 500
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+
+# Data
+data:
+  train_path: data/train.bin
+  val_path: data/val.bin
+
+# Checkpointing & Logging
+checkpoint_dir: data/checkpoints/pretrain
+save_interval: 2000
+eval_interval: 500
+eval_iters: 50
+log_interval: 10
+
+# System
+compile: true                    # torch.compile (CUDA only)
+gradient_checkpointing: false    # Not needed at 50M

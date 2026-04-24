@@ -1,0 +1,39 @@
+# 160M parameter model -- the sweet spot for this project
+# Trains in ~4-12 hours on 3x B200, ~24-48 hours on a single A100/4090
+# Large enough to be a passable chatbot, small enough to iterate on
+
+model:
+  d_model: 768
+  n_heads: 12
+  n_kv_heads: 4
+  n_blocks: 20
+  d_ff: 2048            # ~8/3 * 768, rounded
+  vocab_size: 50257
+  seq_length: 1024
+  dropout: 0.0
+  rope_theta: 10000.0
+
+training:
+  max_steps: 50000       # ~5B tokens with default batch config
+  batch_size: 8          # Per-GPU
+  grad_accum_steps: 4    # Effective batch = 8 * 3_gpus * 4 = 96 seqs = ~98K tokens
+  learning_rate: 6.0e-4
+  min_lr: 6.0e-5
+  warmup_steps: 2000
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+
+data:
+  train_path: data/train.bin
+  val_path: data/val.bin
+
+checkpoint_dir: data/checkpoints/pretrain
+save_interval: 2000
+eval_interval: 500
+eval_iters: 100
+log_interval: 10
+
+compile: true
+gradient_checkpointing: false    # Enable if OOM on smaller GPUs
