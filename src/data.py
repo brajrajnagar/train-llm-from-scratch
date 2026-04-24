@@ -163,14 +163,19 @@ class FinetuneDataset(Dataset):
       targets:    (seq_length,) target IDs, -1 for masked positions
     """
 
-    def __init__(self, data_path: str, seq_length: int):
+    def __init__(self, data_path: str, seq_length: int, indices: list = None):
         self.seq_length = seq_length
-        self.examples = []
+        all_examples = []
 
         with open(data_path, "r") as f:
             for line in f:
                 example = json.loads(line.strip())
-                self.examples.append(example)
+                all_examples.append(example)
+
+        if indices is None:
+            self.examples = all_examples
+        else:
+            self.examples = [all_examples[i] for i in indices]
 
         print(f"Loaded {len(self.examples)} fine-tuning examples from {data_path}")
 
@@ -196,9 +201,11 @@ class FinetuneDataset(Dataset):
         token_ids = torch.tensor(token_ids, dtype=torch.long)
         loss_mask = torch.tensor(loss_mask, dtype=torch.long)
 
-        # Input is all but last token, targets are shifted by 1
+        # Input is all but last token, targets are shifted by 1.
+        # Clone y because it's a view of token_ids that overlaps with x --
+        # writing -1 into y would otherwise corrupt x and crash the embedding lookup.
         x = token_ids[:-1]
-        y = token_ids[1:]
+        y = token_ids[1:].clone()
         mask = loss_mask[1:]  # Align mask with targets
 
         # Set targets to -1 where loss mask is 0 (ignored by cross_entropy)

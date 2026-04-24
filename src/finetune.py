@@ -53,6 +53,8 @@ def main():
     parser.add_argument("--max_steps", type=int, default=2000)
     parser.add_argument("--learning_rate", type=float, default=2e-5)
     parser.add_argument("--warmup_steps", type=int, default=100)
+    parser.add_argument("--val_split", type=float, default=0.02,
+                        help="Fraction of examples to hold out for validation")
     args = parser.parse_args()
 
     # 1. Load config from YAML (same model architecture as pretraining)
@@ -111,10 +113,19 @@ def main():
         fused=(ctx.device.type == "cuda"),
     )
 
-    # 7. Dataset
+    # 7. Dataset -- deterministic train/val split so every rank sees the same split
+    with open(args.finetune_data) as _f:
+        n_total = sum(1 for _ in _f)
+    rng = torch.Generator().manual_seed(42)
+    perm = torch.randperm(n_total, generator=rng).tolist()
+    n_val = max(int(n_total * args.val_split), 1) if args.val_split > 0 else 0
+    val_indices = perm[:n_val]
+    train_indices = perm[n_val:]
+
     train_dataset = FinetuneDataset(
         args.finetune_data,
         config["model"]["seq_length"],
+        indices=train_indices,
     )
     train_loader = create_dataloader(
         train_dataset,
@@ -122,14 +133,28 @@ def main():
         distributed=(ctx.strategy == "fsdp"),
     )
 
-    # 8. Train (no validation set for fine-tuning -- dataset is small)
+    val_loader = None
+    if n_val > 0:
+        val_dataset = FinetuneDataset(
+            args.finetune_data,
+            config["model"]["seq_length"],
+            indices=val_indices,
+        )
+        val_loader = create_dataloader(
+            val_dataset,
+            batch_size=config["training"]["batch_size"],
+            distributed=(ctx.strategy == "fsdp"),
+        )
+
+    # 8. Train
     ctx.print(f"\nStarting fine-tuning...")
     ctx.print(f"  Max steps: {args.max_steps}")
     ctx.print(f"  Learning rate: {args.learning_rate}")
     ctx.print(f"  Training examples: {len(train_dataset)}")
+    ctx.print(f"  Val examples: {n_val}")
     ctx.print("")
 
-    trainer = Trainer(model, optimizer, train_loader, None, config, ctx)
+    trainer = Trainer(model, optimizer, train_loader, val_loader, config, ctx)
     trainer.train()
 
     cleanup_distributed(ctx)
