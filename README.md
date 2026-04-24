@@ -2,6 +2,18 @@
 
 Build and train a 160M-parameter LLM chatbot from scratch using modern architecture (Llama-style). Educational code with detailed comments explaining every design decision.
 
+## Getting Started
+
+**New here?** Just run:
+
+```bash
+python run.py
+```
+
+This interactive tool walks you through every step -- no need to memorize commands.
+
+**Want to understand the code?** Read [GUIDE.md](GUIDE.md) -- it tells you which files to read and in what order.
+
 ## What You'll Build
 
 A complete LLM training pipeline in 5 steps:
