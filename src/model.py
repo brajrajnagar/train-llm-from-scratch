@@ -36,6 +36,10 @@ class ModelConfig:
     """
     All model hyperparameters in one place.
     Loaded from YAML config files (configs/50m.yaml, configs/160m.yaml, etc.)
+    
+    Example (160m.yaml):
+        vocab_size=50257, d_model=768, n_heads=12, n_kv_heads=4,
+        n_blocks=20, d_ff=2048, seq_length=1024
     """
     vocab_size: int = 50257
     d_model: int = 768
@@ -49,11 +53,29 @@ class ModelConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> "ModelConfig":
-        """Create config from a dictionary (parsed from YAML)."""
+        """Create config from a dictionary (parsed from YAML).
+        
+        Example:
+            d = {"vocab_size": 50257, "d_model": 768, "n_heads": 12, ...}
+            config = ModelConfig.from_dict(d)
+            # Returns: ModelConfig(vocab_size=50257, d_model=768, n_heads=12, ...)
+        """
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
     def param_count_estimate(self) -> int:
-        """Estimate total parameters (useful for sanity checks)."""
+        """Estimate total parameters (useful for sanity checks).
+        
+        Example (160M model):
+            vocab_size=50257, d_model=768, n_heads=12, n_kv_heads=4, n_blocks=20, d_ff=2048
+            
+            emb = 50257 * 768 = 38,597,376
+            head_dim = 768 / 12 = 64
+            attn_per_block = 768*768 + 768*4*64 + 768*4*64 + 768*768 = 1,572,864
+            ffn_per_block = 3 * 768 * 2048 = 4,718,592
+            norm_per_block = 2 * 768 = 1,536
+            block_total = 1,572,864 + 4,718,592 + 1,536 = 6,292,992
+            total = 38,597,376 + 20 * 6,292,992 + 768 = ~164M parameters
+        """
         emb = self.vocab_size * self.d_model
         head_dim = self.d_model // self.n_heads
         attn_per_block = (
@@ -94,11 +116,39 @@ class RMSNorm(nn.Module):
     """
 
     def __init__(self, dim: int, eps: float = 1e-6):
+        """Initialize RMSNorm.
+        
+        Args:
+            dim: Dimension to normalize (e.g., d_model=768)
+            eps: Small constant for numerical stability
+            
+        Example:
+            norm = RMSNorm(dim=768)
+            # Creates learnable weight of shape (768,)
+        """
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))  # gamma (scale only)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass: normalize by RMS, then scale.
+        
+        Dimension flow:
+            Input:  (batch, seq_len, d_model) e.g., (2, 1024, 768)
+            Step 1: x.pow(2) -> (2, 1024, 768) - square each element
+            Step 2: .mean(-1, keepdim=True) -> (2, 1024, 1) - mean over last dim
+            Step 3: + eps -> (2, 1024, 1)
+            Step 4: torch.rsqrt() -> (2, 1024, 1) - 1/sqrt for normalization
+            Step 5: x.float() * rms -> (2, 1024, 768) - broadcast multiply
+            Step 6: * self.weight -> (2, 1024, 768) - element-wise scale
+            Output: (batch, seq_len, d_model) e.g., (2, 1024, 768)
+        
+        Example:
+            x = torch.randn(2, 1024, 768)  # Random input
+            norm = RMSNorm(768)
+            out = norm(x)  # Output shape: (2, 1024, 768)
+            # Each row is normalized to have RMS ~1, then scaled by weight
+        """
         # rsqrt = 1 / sqrt(mean(x^2) + eps) -- computed in float32 for stability
         rms = torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + self.eps)
         return (x.float() * rms).type_as(x) * self.weight
@@ -149,8 +199,32 @@ class RotaryPositionalEmbedding:
         """
         Precompute the complex exponentials for RoPE.
 
-        Returns a (max_seq_len, dim//2) tensor of complex numbers
-        representing the rotation for each (position, dimension_pair).
+        Args:
+            dim: Dimension of head (must be even, e.g., head_dim=64)
+            max_seq_len: Maximum sequence length to support (e.g., 2048)
+            theta: Base frequency (default 10000.0)
+            device: Device to compute on
+            
+        Returns:
+            Complex tensor of shape (max_seq_len, dim//2)
+            Each element represents rotation angle for (position, dim_pair)
+        
+        Dimension flow (dim=64, max_seq_len=2048):
+            Step 1: torch.arange(0, 64, 2) -> [0, 2, 4, ..., 62] (32 values)
+            Step 2: / dim -> [0/64, 2/64, ..., 62/64] (normalized indices)
+            Step 3: theta ** (-indices) -> frequencies [1.0, 0.75, ..., 0.01]
+            Step 4: torch.arange(2048) -> positions [0, 1, ..., 2047]
+            Step 5: torch.outer(positions, freqs) -> (2048, 32) angles
+            Step 6: torch.polar(ones, angles) -> (2048, 32) complex rotations
+            Output: (max_seq_len, dim//2) complex tensor e.g., (2048, 32)
+        
+        Example:
+            freqs_cis = RotaryPositionalEmbedding.precompute_freqs_cis(
+                dim=64, max_seq_len=2048, device="cuda"
+            )
+            # freqs_cis.shape = (2048, 32) complex tensor
+            # freqs_cis[0, :] = rotation for position 0
+            # freqs_cis[100, :] = rotation for position 100
         """
         # Frequency for each dimension pair: theta^(-2i/dim)
         # Lower dimensions rotate slowly (capture long-range patterns),
@@ -177,9 +251,33 @@ class RotaryPositionalEmbedding:
         Apply rotary embeddings to Q and K tensors.
 
         Args:
-            xq: (batch, seq_len, n_heads, head_dim)
-            xk: (batch, seq_len, n_kv_heads, head_dim)
-            freqs_cis: (seq_len, head_dim//2) complex tensor
+            xq: Query tensor (batch, seq_len, n_heads, head_dim)
+            xk: Key tensor (batch, seq_len, n_kv_heads, head_dim)
+            freqs_cis: Precomputed rotations (seq_len, head_dim//2) complex
+            
+        Returns:
+            Tuple of rotated (xq, xk) with same shapes as inputs
+        
+        Dimension flow (batch=2, seq_len=1024, n_heads=12, n_kv_heads=4, head_dim=64):
+            Input xq: (2, 1024, 12, 64)
+            Input xk: (2, 1024, 4, 64)
+            freqs_cis: (1024, 32) complex
+            
+            Step 1: xq.reshape(2, 1024, 12, 32, 2) -> group dim pairs
+            Step 2: view_as_complex -> (2, 1024, 12, 32) complex
+            Step 3: freqs_cis.unsqueeze(0).unsqueeze(2) -> (1, 1024, 1, 32)
+            Step 4: xq_complex * freqs_cis -> (2, 1024, 12, 32) rotated
+            Step 5: view_as_real().flatten(-2) -> (2, 1024, 12, 64)
+            Output xq: (2, 1024, 12, 64) - same shape, rotated
+            Output xk: (2, 1024, 4, 64) - same shape, rotated
+        
+        Example:
+            xq = torch.randn(2, 1024, 12, 64)  # Query
+            xk = torch.randn(2, 1024, 4, 64)   # Key
+            freqs_cis = RotaryPositionalEmbedding.precompute_freqs_cis(64, 1024)
+            xq_rot, xk_rot = RotaryPositionalEmbedding.apply_rotary_emb(xq, xk, freqs_cis)
+            # xq_rot.shape = (2, 1024, 12, 64) - rotated by position
+            # xk_rot.shape = (2, 1024, 4, 64) - rotated by position
         """
         # Reshape to complex: group pairs of dims -> complex numbers
         # (B, T, H, D) -> (B, T, H, D//2, 2) -> complex (B, T, H, D//2)
@@ -232,6 +330,23 @@ class GroupedQueryAttention(nn.Module):
     """
 
     def __init__(self, config: ModelConfig):
+        """Initialize Grouped Query Attention.
+        
+        Args:
+            config: ModelConfig with n_heads=12, n_kv_heads=4, d_model=768
+            
+        Example (160M model):
+            config = ModelConfig(d_model=768, n_heads=12, n_kv_heads=4)
+            attn = GroupedQueryAttention(config)
+            
+            # Internal shapes:
+            #   head_dim = 768 / 12 = 64
+            #   n_rep = 12 / 4 = 3 (each KV head serves 3 query heads)
+            #   W_q: (768, 768) - Q projection (12 heads * 64)
+            #   W_k: (768, 256) - K projection (4 heads * 64)
+            #   W_v: (768, 256) - V projection (4 heads * 64)
+            #   W_o: (768, 768) - Output projection
+        """
         super().__init__()
         self.n_heads = config.n_heads
         self.n_kv_heads = config.n_kv_heads
@@ -258,10 +373,25 @@ class GroupedQueryAttention(nn.Module):
         """
         Repeat KV heads to match number of query heads.
 
-        (B, T, n_kv_heads, head_dim) -> (B, T, n_heads, head_dim)
-
-        Example with n_kv_heads=4, n_rep=3:
-          [K1, K2, K3, K4] -> [K1, K1, K1, K2, K2, K2, K3, K3, K3, K4, K4, K4]
+        Args:
+            x: KV tensor (batch, seq_len, n_kv_heads, head_dim)
+            n_rep: Number of times to repeat each head
+            
+        Returns:
+            Repeated tensor (batch, seq_len, n_heads, head_dim)
+        
+        Dimension flow (n_kv_heads=4, n_rep=3):
+            Input:  (2, 1024, 4, 64) - 4 KV heads
+            Step 1: unsqueeze(3) -> (2, 1024, 4, 1, 64) - add repeat dim
+            Step 2: expand(2, 1024, 4, 3, 64) - repeat 3 times
+            Step 3: reshape -> (2, 1024, 12, 64) - flatten to 12 heads
+            Output: (2, 1024, 12, 64) - now matches 12 query heads
+        
+        Example:
+            k = torch.randn(2, 1024, 4, 64)  # 4 KV heads
+            k_repeated = GroupedQueryAttention.repeat_kv(k, n_rep=3)
+            # k_repeated.shape = (2, 1024, 12, 64)
+            # [K1, K2, K3, K4] -> [K1,K1,K1, K2,K2,K2, K3,K3,K3, K4,K4,K4]
         """
         if n_rep == 1:
             return x
@@ -275,6 +405,60 @@ class GroupedQueryAttention(nn.Module):
         freqs_cis: torch.Tensor,
         mask: torch.Tensor = None,
     ) -> torch.Tensor:
+        """
+        Forward pass for Grouped Query Attention.
+        
+        Args:
+            x: Input tensor (batch, seq_len, d_model)
+            freqs_cis: RoPE frequencies (seq_len, head_dim//2) complex
+            mask: Optional attention mask (seq_len, seq_len)
+            
+        Returns:
+            Output tensor (batch, seq_len, d_model)
+        
+        Dimension flow (batch=2, seq_len=1024, d_model=768, n_heads=12, n_kv_heads=4, head_dim=64):
+            Input x: (2, 1024, 768)
+            
+            === Project to Q, K, V ===
+            Step 1: W_q(x) -> (2, 1024, 768) then .view -> (2, 1024, 12, 64)
+            Step 2: W_k(x) -> (2, 1024, 256) then .view -> (2, 1024, 4, 64)
+            Step 3: W_v(x) -> (2, 1024, 256) then .view -> (2, 1024, 4, 64)
+            
+            === Apply RoPE ===
+            Step 4: apply_rotary_emb(q, k, freqs_cis)
+                q: (2, 1024, 12, 64) -> rotated -> (2, 1024, 12, 64)
+                k: (2, 1024, 4, 64) -> rotated -> (2, 1024, 4, 64)
+            
+            === Repeat KV to match Q heads ===
+            Step 5: repeat_kv(k, n_rep=3) -> (2, 1024, 12, 64)
+            Step 6: repeat_kv(v, n_rep=3) -> (2, 1024, 12, 64)
+            
+            === Transpose for attention ===
+            Step 7: q.transpose(1, 2) -> (2, 12, 1024, 64)
+            Step 8: k.transpose(1, 2) -> (2, 12, 1024, 64)
+            Step 9: v.transpose(1, 2) -> (2, 12, 1024, 64)
+            
+            === Scaled Dot-Product Attention ===
+            Step 10: scores = (q @ k.transpose(-2, -1)) * scale
+                     (2, 12, 1024, 64) @ (2, 12, 64, 1024) -> (2, 12, 1024, 1024)
+            Step 11: scores + causal_mask -> (2, 12, 1024, 1024) masked
+            Step 12: attn = softmax(scores, dim=-1) -> (2, 12, 1024, 1024)
+            Step 13: out = attn @ v
+                     (2, 12, 1024, 1024) @ (2, 12, 1024, 64) -> (2, 12, 1024, 64)
+            
+            === Output projection ===
+            Step 14: out.transpose(1, 2) -> (2, 1024, 12, 64)
+            Step 15: .contiguous().view -> (2, 1024, 768)
+            Step 16: W_o(out) -> (2, 1024, 768)
+            Output: (2, 1024, 768)
+        
+        Example:
+            x = torch.randn(2, 1024, 768)  # Input
+            freqs_cis = RotaryPositionalEmbedding.precompute_freqs_cis(64, 1024)
+            attn = GroupedQueryAttention(config)
+            out = attn(x, freqs_cis)
+            # out.shape = (2, 1024, 768)
+        """
         B, T, _ = x.shape
 
         # Project to Q, K, V
@@ -357,12 +541,58 @@ class SwiGLUFFN(nn.Module):
     """
 
     def __init__(self, config: ModelConfig):
+        """Initialize SwiGLU FFN.
+        
+        Args:
+            config: ModelConfig with d_model=768, d_ff=2048
+            
+        Example (160M model):
+            config = ModelConfig(d_model=768, d_ff=2048)
+            ffn = SwiGLUFFN(config)
+            
+            # Internal shapes:
+            #   gate: (768, 2048) - "how much to let through"
+            #   up:   (768, 2048) - "what to let through"
+            #   down: (2048, 768) - "compress back"
+            # Total params: 768*2048*3 = 4,718,592
+        """
         super().__init__()
         self.gate = nn.Linear(config.d_model, config.d_ff, bias=False)
         self.up = nn.Linear(config.d_model, config.d_ff, bias=False)
         self.down = nn.Linear(config.d_ff, config.d_model, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for SwiGLU FFN.
+        
+        Args:
+            x: Input tensor (batch, seq_len, d_model)
+            
+        Returns:
+            Output tensor (batch, seq_len, d_model)
+        
+        Dimension flow (batch=2, seq_len=1024, d_model=768, d_ff=2048):
+            Input x: (2, 1024, 768)
+            
+            Step 1: gate(x) = Linear(x) -> (2, 1024, 2048)
+            Step 2: up(x) = Linear(x) -> (2, 1024, 2048)
+            Step 3: F.silu(gate) -> (2, 1024, 2048) - SiLU activation
+            Step 4: F.silu(gate) * up -> (2, 1024, 2048) - element-wise multiply
+            Step 5: down(result) -> (2, 1024, 768)
+            Output: (2, 1024, 768)
+        
+        Example:
+            x = torch.randn(2, 1024, 768)
+            ffn = SwiGLUFFN(config)
+            out = ffn(x)
+            # out.shape = (2, 1024, 768)
+            
+            # What happens internally:
+            # gate_out = x @ gate.weight  # (2, 1024, 2048)
+            # up_out = x @ up.weight      # (2, 1024, 2048)
+            # activated = SiLU(gate_out) * up_out  # (2, 1024, 2048)
+            # out = activated @ down.weight  # (2, 1024, 768)
+        """
         # SwiGLU: SiLU(gate(x)) * up(x), then project back down
         # SiLU(x) = x * sigmoid(x) -- smooth, non-monotonic activation
         return self.down(F.silu(self.gate(x)) * self.up(x))
@@ -392,9 +622,25 @@ class TransformerBlock(nn.Module):
       +----------------------------+
         |
       Output
+    
+    This is called "pre-norm" architecture - normalization BEFORE each sub-layer.
+    More stable training than post-norm, especially for deep networks.
     """
 
     def __init__(self, config: ModelConfig):
+        """Initialize Transformer Block.
+        
+        Args:
+            config: ModelConfig with all hyperparameters
+            
+        Example (160M model):
+            block = TransformerBlock(config)
+            # Contains:
+            #   attention_norm: RMSNorm(768)
+            #   attention: GroupedQueryAttention (12 heads, 4 KV heads)
+            #   ffn_norm: RMSNorm(768)
+            #   ffn: SwiGLUFFN (768 -> 2048 -> 768)
+        """
         super().__init__()
         self.attention_norm = RMSNorm(config.d_model)
         self.attention = GroupedQueryAttention(config)
@@ -407,6 +653,40 @@ class TransformerBlock(nn.Module):
         freqs_cis: torch.Tensor,
         mask: torch.Tensor = None,
     ) -> torch.Tensor:
+        """
+        Forward pass for Transformer Block.
+        
+        Args:
+            x: Input tensor (batch, seq_len, d_model)
+            freqs_cis: RoPE frequencies (seq_len, head_dim//2) complex
+            mask: Optional attention mask (seq_len, seq_len)
+            
+        Returns:
+            Output tensor (batch, seq_len, d_model)
+        
+        Dimension flow (batch=2, seq_len=1024, d_model=768):
+            Input x: (2, 1024, 768)
+            
+            === Attention sub-layer ===
+            Step 1: self.attention_norm(x) -> (2, 1024, 768) - normalized
+            Step 2: self.attention(norm_x, freqs_cis, mask) -> (2, 1024, 768)
+            Step 3: x + attention_out -> (2, 1024, 768) - residual connection
+                    (Now x contains original + attention output)
+            
+            === FFN sub-layer ===
+            Step 4: self.ffn_norm(x) -> (2, 1024, 768) - normalized
+            Step 5: self.ffn(norm_x) -> (2, 1024, 768)
+            Step 6: x + ffn_out -> (2, 1024, 768) - residual connection
+            Output: (2, 1024, 768)
+        
+        Example:
+            x = torch.randn(2, 1024, 768)
+            freqs_cis = RotaryPositionalEmbedding.precompute_freqs_cis(64, 1024)
+            block = TransformerBlock(config)
+            out = block(x, freqs_cis)
+            # out.shape = (2, 1024, 768)
+            # out = x + FFN(RMSNorm(x + GQA(RMSNorm(x))))
+        """
         # Pre-norm architecture: normalize BEFORE each sub-layer
         # (More stable training than post-norm, especially for deep networks)
         x = x + self.attention(self.attention_norm(x), freqs_cis, mask)
@@ -452,6 +732,26 @@ class LLM(nn.Module):
     """
 
     def __init__(self, config: ModelConfig):
+        """Initialize LLM model.
+        
+        Args:
+            config: ModelConfig with all hyperparameters
+            
+        Example (160M model):
+            config = ModelConfig(
+                vocab_size=50257, d_model=768, n_heads=12, n_kv_heads=4,
+                n_blocks=20, d_ff=2048, seq_length=1024
+            )
+            model = LLM(config)
+            
+            # Internal structure:
+            #   token_emb: (50257, 768) - token embeddings
+            #   blocks: 20x TransformerBlock
+            #   norm: RMSNorm(768)
+            #   lm_head: (768, 50257) - output projection (tied with token_emb)
+            #   freqs_cis: (2048, 32) complex - precomputed RoPE
+            # Total: ~160M parameters
+        """
         super().__init__()
         self.config = config
 
@@ -490,6 +790,11 @@ class LLM(nn.Module):
         Most weights: normal(0, 0.02)
         Residual projections (W_o and down): scaled by 1/sqrt(2*n_blocks)
           -> Prevents signal growth through deep residual streams
+        
+        Example (160M model, n_blocks=20):
+            scale = 1 / sqrt(2 * 20) = 1 / sqrt(40) = 0.158
+            W_o weights: normal(0, 0.02 * 0.158) = normal(0, 0.00316)
+            down weights: normal(0, 0.02 * 0.158) = normal(0, 0.00316)
         """
         for module in self.modules():
             if isinstance(module, nn.Linear):
@@ -514,10 +819,45 @@ class LLM(nn.Module):
         Args:
             idx:     (batch, seq_len) token IDs
             targets: (batch, seq_len) target token IDs (optional, for training)
-
+            
         Returns:
             logits: (batch, seq_len, vocab_size)
             loss:   scalar cross-entropy loss (None if no targets)
+        
+        Dimension flow (batch=2, seq_len=1024, vocab_size=50257, d_model=768):
+            Input idx: (2, 1024) - token IDs
+            Input targets: (2, 1024) - target token IDs (optional)
+            
+            Step 1: self.token_emb(idx) -> (2, 1024, 768) - embed tokens
+            Step 2: self.freqs_cis[:1024] -> (1024, 32) - slice RoPE freqs
+            
+            Step 3: For each of 20 blocks:
+                block(x, freqs_cis) -> (2, 1024, 768)
+                (Each block: RMSNorm -> GQA -> Residual -> RMSNorm -> SwiGLU -> Residual)
+            
+            Step 4: self.norm(x) -> (2, 1024, 768) - final normalization
+            Step 5: self.lm_head(x) -> (2, 1024, 50257) - project to vocab
+            Output logits: (2, 1024, 50257)
+            
+            If targets provided:
+            Step 6: logits.view(-1, 50257) -> (2048, 50257)
+            Step 7: targets.view(-1) -> (2048,)
+            Step 8: cross_entropy(logits, targets, ignore_index=-1) -> scalar
+            Output loss: scalar (e.g., 4.523)
+        
+        Example:
+            model = LLM(config)
+            idx = torch.randint(0, 50257, (2, 1024))  # Random tokens
+            targets = torch.randint(0, 50257, (2, 1024))  # Target tokens
+            
+            logits, loss = model(idx, targets)
+            # logits.shape = (2, 1024, 50257)
+            # loss = scalar (e.g., 4.523)
+            
+            # Inference (no targets):
+            logits, _ = model(idx)
+            # logits.shape = (2, 1024, 50257)
+            # loss = None
         """
         B, T = idx.shape
 
@@ -561,6 +901,57 @@ class LLM(nn.Module):
           1. Temperature: scale logits (lower = more focused, higher = more random)
           2. Top-k: keep only the k highest-probability tokens
           3. Top-p (nucleus): keep smallest set of tokens with cumulative prob >= p
+        
+        Args:
+            idx: (batch, seq_len) input token IDs
+            max_new_tokens: Maximum tokens to generate
+            temperature: Sampling temperature (0.7 = balanced, 1.0 = default)
+            top_k: Top-k filtering (50 = keep top 50 tokens)
+            top_p: Top-p/nucleus filtering (0.9 = keep tokens covering 90% prob)
+            
+        Returns:
+            Generated token IDs (batch, seq_len + max_new_tokens)
+        
+        Generation loop (batch=1, prompt_len=10, max_new_tokens=100):
+            Input idx: (1, 10) - "The meaning of life"
+            
+            For each of 100 iterations:
+                Step 1: idx_cond = idx[:, -1024:] -> (1, 10) - crop to seq_length
+                Step 2: logits, _ = model(idx_cond) -> (1, 10, 50257)
+                Step 3: logits = logits[:, -1, :] -> (1, 50257) - last position only
+                Step 4: logits = logits / 0.7 -> (1, 50257) - temperature scaling
+                Step 5: topk filtering: keep top 50, zero rest -> (1, 50257)
+                Step 6: topp filtering: keep 90% cumulative prob -> (1, 50257)
+                Step 7: probs = softmax(logits) -> (1, 50257) - probabilities
+                Step 8: idx_next = multinomial(probs) -> (1, 1) - sample token
+                Step 9: idx = cat([idx, idx_next], dim=1) -> (1, 11) growing...
+            
+            After 100 iterations: idx = (1, 110)
+            Output: (1, 110) - original prompt + 100 new tokens
+        
+        Example:
+            model = LLM(config)
+            model.load_state_dict(checkpoint["model_state_dict"])
+            model.eval()
+            
+            # Encode prompt
+            prompt = "The meaning of life is"
+            token_ids = tokenizer.encode(prompt)  # [464, 318, 257, 3730]
+            idx = torch.tensor([token_ids])  # (1, 4)
+            
+            # Generate
+            output = model.generate(
+                idx,
+                max_new_tokens=100,
+                temperature=0.7,
+                top_k=50,
+                top_p=0.9,
+            )
+            # output.shape = (1, 104) - 4 prompt + 100 new tokens
+            
+            # Decode
+            response = tokenizer.decode(output[0].tolist())
+            # "The meaning of life is a philosophical question that..."
         """
         for _ in range(max_new_tokens):
             # Crop to max sequence length
@@ -605,6 +996,21 @@ class LLM(nn.Module):
 
         New token embeddings are initialized with small random values.
         Weight tying is maintained.
+        
+        Args:
+            new_vocab_size: New vocabulary size (e.g., 50261 for +4 chat tokens)
+        
+        Example (fine-tuning with chat tokens):
+            model = LLM(config)  # vocab_size=50257
+            # Load pretrained weights
+            model.load_state_dict(pretrained_checkpoint)
+            
+            # Resize for chat tokens
+            model.resize_token_embeddings(50261)
+            # token_emb: (50257, 768) -> (50261, 768) - new tokens initialized
+            # lm_head: (768, 50257) -> (768, 50261) - tied with token_emb
+            
+            # Now model can handle <|user|>, <|assistant|>, etc.
         """
         old_vocab_size = self.config.vocab_size
         if new_vocab_size == old_vocab_size:
@@ -624,5 +1030,11 @@ class LLM(nn.Module):
         self.lm_head.weight = self.token_emb.weight
 
     def param_count(self) -> int:
-        """Count trainable parameters (excluding tied weights)."""
+        """Count trainable parameters (excluding tied weights).
+        
+        Example:
+            model = LLM(config)
+            params = model.param_count()
+            # For 160M config: ~160,000,000
+        """
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
